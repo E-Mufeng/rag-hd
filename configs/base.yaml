@@ -1,0 +1,108 @@
+# ============================================================================
+# 火电运维 RAG —— 基础配置（共享默认）
+# ----------------------------------------------------------------------------
+# 部署形态：Docker Compose 单机（Milvus standalone HNSW + OpenSearch BM25）
+#
+# 【配置分层】
+#   base.yaml        本文件。共享默认：阈值、检索参数、服务地址
+#   {mode}.yaml      部署覆盖。按 deployment.mode 叠加，docker.yaml 用容器内服务名
+#   环境变量 RAG_*   编排注入。优先级最高（见 api/config.py），切环境只改这里
+#
+# 【地址怎么写才对 —— 内网部署最常见的返工点】
+#   同一个服务，站的角度不同，地址就不同，写错了连不通：
+#     容器内互访 ：用 compose 网络里的服务名，如 http://milvus:19530
+#                  （DNS 由 Docker 内建，只在同一 network 内可解析）
+#     宿主机/外部：用宿主 IP 或内网域名，如 http://10.10.20.11:19530
+#     本机自测   ：http://127.0.0.1:19530
+#   本文件按「内网地址占位」写；docker.yaml 会覆盖成「容器内服务名」。
+# ============================================================================
+
+project:
+  name: thermal-power-rag
+  scene: 火电运维内网私有化知识库问答（维护部试点）
+  note: 本仓库仅含模拟样例数据，无真实业务文档，无本地大模型下载逻辑。
+
+deployment:
+  mode: docker   # 仅 docker 模式：Milvus standalone(HNSW) + OpenSearch(BM25)
+
+run:
+  # use_mock = true  -> 全部后端用 mock，不连任何服务（静态阅读/离线演示）
+  # use_mock = false -> 真实后端，对接内网 Milvus + OpenSearch + 模型服务
+  use_mock: true
+
+# ----------------------------------------------------------------------------
+# 模型服务地址（内网地址占位；容器内互访地址见 docker.yaml）
+# ----------------------------------------------------------------------------
+models:
+  embedder:
+    service_url: http://10.10.20.31:8001/v1/embeddings   # BGE-M3 向量化服务
+    dim: 1024
+  intent:
+    service_url: http://10.10.20.31:8002/v1/embeddings   # MiniLM 句向量服务（意图分类用）
+  reranker:
+    service_url: http://10.10.20.31:8003/v1/rank         # BGE-Reranker-v2-m3 精排服务
+  layout:
+    service_url: http://10.10.20.31:8004/v1/layout       # 版面分析 / OCR（扫描件）
+  llm:
+    backend: vllm
+    base_url: http://10.10.20.21:8000/v1                 # 厂内 GPU 推理节点
+    model: Qwen3-14B
+    temperature: 0.1
+    enable_thinking: false    # Qwen3 为混合推理模型；运维问答优先低延迟，默认关思维链
+
+# ----------------------------------------------------------------------------
+# 存储后端：固定 docker 模式
+# ----------------------------------------------------------------------------
+storage:
+  vectorstore:
+    backend: milvus
+    uri: http://10.10.20.11:19530
+    collection: huodian_chunks
+    index_type: HNSW
+    metric_type: L2
+    search_ef: 64             # HNSW 查询期 ef，越大越准越慢，试点先按 64
+  bm25:
+    backend: opensearch
+    uri: http://10.10.20.12:9200
+    index: huodian_bm25
+
+# ----------------------------------------------------------------------------
+# 阈值配置（置信度闸门 / 去重分档 / 意图阈值）
+# ----------------------------------------------------------------------------
+confidence:
+  high: 0.70          # >= high  直接作答并溯源
+  medium_low: 0.40    # [medium_low, high)  中等置信（给答案 + 提示核实）
+  medium_high: 0.70   # 与 high 衔接，显式标注 medium 区间上限
+  low: 0.40           # < low    拒答
+  # 聚合策略：Top-3 加权聚合 + Top1 高分兜底（见 pipeline_online/rerank.py）
+  top1_fallback: 0.92
+
+dedup:
+  minhash_threshold: 0.85
+  embedding_high: 0.95
+  embedding_medium: 0.85
+
+intent:
+  threshold: 0.55
+  domain_hints_enabled: true
+
+retrieval:
+  dense_top_k: 10
+  bm25_top_k: 10
+  final_top_k: 5
+  rrf_k: 60
+  recall_priority: true
+
+rewrite:
+  term_normalization: true
+  hyde_enabled: false
+
+api:
+  host: 0.0.0.0
+  port: 8080
+
+logging:
+  dir: ./data/logs
+  reject_log: reject.log        # 拒答请求（供维护班回流优化领域提示词）
+  low_conf_log: low_conf.log    # 低置信请求（供阈值重标定抽样）
+  feedback_log: feedback.jsonl  # 维护班反馈（供术语库与提示词迭代）

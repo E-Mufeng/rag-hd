@@ -1,0 +1,28 @@
+# --- Python ---
+__pycache__/
+*.pyc
+
+# --- 运行时产物（不入库）---
+# 原始规程 / 扫描件等现场资料：严禁入库（含真实业务数据）
+data/raw/
+# 索引产物与中间文件
+data/index/
+data/processed/
+# 拒答 / 低置信 / 反馈日志：运行时生成，仅留在现场用于回流优化
+data/logs/*
+!data/logs/.gitkeep
+*.log
+
+# --- 环境与缓存 ---
+.env
+.venv/
+venv/
+models_cache/
+.hf_cache/
+*.db
+.DS_Store
+build.log
+
+# --- IDE ---
+.idea/
+.vscode/

@@ -1,0 +1,99 @@
+# ============================================================================
+# 顶层 docker-compose 模板（thermal-power-rag 工程框架）
+# ----------------------------------------------------------------------------
+# ⚠️ 仅模板：展示服务定义与依赖关系，作为部署参考。
+# ⚠️ 镜像需在【内网 Harbor】提前预置；本项目不提供镜像、不提供启动脚本。
+# ⚠️ 不要在本文件写任何拉取/构建镜像的执行逻辑。
+#
+# 组件：Milvus standalone（HNSW） + OpenSearch（BM25 磁盘持久化）
+#       + rag-api（FastAPI 业务服务） + vLLM 生成服务（可选，也可用独立 GPU 节点）
+#
+# 网内寻址（重要）：
+#   下列服务名 milvus / opensearch / vllm / rag-api 由 Docker 内建 DNS 解析，
+#   只在同一 compose network 内的容器之间有效。
+#   宿主机或其它机器访问，请走 ports 映射到宿主机的地址，例如：
+#       http://10.10.20.11:8080/v1/ask     （rag-api）
+#       http://10.10.20.11:19530           （milvus）
+#   configs/docker.yaml 用的是容器内视角（服务名），api/config.py 支持用
+#   RAG_* 环境变量覆盖，故本文件在 environment 段按容器内视角注入。
+# ============================================================================
+
+services:
+  milvus:
+    image: milvusdb/milvus:latest            # 内网 Harbor 预置等价镜像
+    command: ["milvus", "run", "standalone"]
+    ports:
+      - "19530:19530"                        # 宿主机/跨机访问入口
+    volumes:
+      - milvus_data:/var/lib/milvus          # 向量持久化
+    environment:
+      - ETCD_USE_EMBED=true
+      - MINIO_USE_EMBED=true
+
+  opensearch:
+    image: opensearchproject/opensearch:latest   # 内网 Harbor 预置等价镜像
+    ports:
+      - "9200:9200"
+    volumes:
+      - os_data:/usr/share/opensearch/data       # BM25 索引磁盘持久化
+    environment:
+      - discovery.type=single-node
+      - "OPENSEARCH_INITIAL_ADMIN_PASSWORD=CHANGE_ME_STRONG_PWD"  # 按内网规范设置
+
+  vllm:                                          # 生成服务：也可部署在独立 GPU 节点
+    image: vllm/vllm-openai:latest               # 内网 Harbor 预置等价镜像
+    command: >
+      --model Qwen/Qwen3-14B
+      --served-model-name Qwen3-14B
+      --dtype auto --max-model-len 8192
+      --gpu-memory-utilization 0.9
+    ports:
+      - "8000:8000"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    # 说明：--served-model-name 必须与 configs 的 llm.model 一致，否则请求会 404。
+    #       Qwen3 默认带思维链；本项目按需通过请求参数关闭（见 backends_real.VLLMClient），
+    #       如需在服务端支持 thinking 解析，追加 --reasoning-parser qwen3。
+
+  rag-api:                                       # 业务服务：问答 / 检索 / 入湖 / 反馈
+    image: harbor.internal/rag/thermal-power-rag-api:0.1.0   # 业务镜像由 CI 构建后推 Harbor
+    command: ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8080"]
+    ports:
+      - "8080:8080"
+    environment:
+      - RAG_USE_MOCK=false
+      - RAG_MILVUS_URI=http://milvus:19530
+      - RAG_OPENSEARCH_URI=http://opensearch:9200
+      - RAG_LLM_BASE_URL=http://vllm:8000/v1
+      - RAG_LLM_MODEL=Qwen3-14B
+      # 向量化 / 意图 / 精排 / 版面服务：同网络部署时用服务名，独立部署时换成内网地址
+      - RAG_EMBEDDER_URL=http://embed:8001/v1/embeddings
+      - RAG_INTENT_URL=http://embed:8002/v1/embeddings
+      - RAG_RERANKER_URL=http://rerank:8003/v1/rank
+      - RAG_LAYOUT_URL=http://layout:8004/v1/layout
+      - RAG_LOG_DIR=/data/logs
+    volumes:
+      - ./data/logs:/data/logs                   # 拒答/低置信/反馈日志落盘到宿主机
+    depends_on:
+      - milvus
+      - opensearch
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request,sys;sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/health',timeout=3).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  # 说明：embed / rerank / layout 三个模型推理服务未在本模板中展开——
+  #       它们通常部署在带 GPU 的推理节点上，镜像同样由内网 Harbor 提供。
+  #       若与上述服务同机同网络，按服务名（http://embed:8001 等）寻址即可。
+
+volumes:
+  milvus_data:
+  os_data:

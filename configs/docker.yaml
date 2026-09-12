@@ -1,0 +1,48 @@
+# ============================================================================
+# 部署覆盖：docker（正式试点）
+# ----------------------------------------------------------------------------
+# 组件：Milvus standalone（HNSW 稠密索引） + OpenSearch（BM25，磁盘持久化）
+# 前提：内网私有 Harbor 已预置镜像；服务器资源充足；不上 K8s 分布式集群。
+#
+# 【本文件里的地址都是「容器内视角」】
+#   milvus / opensearch / vllm / embed 这些主机名由 Docker compose 网络内建 DNS
+#   解析，**只在同一 network 内的容器里可解析**。所以在宿主机浏览器里敲
+#   http://milvus:19530 一定打不开——这不是配置错误，是视角不同。
+#   宿主机或跨机访问请用内网 IP（见 base.yaml 与 docker-compose.yaml 的 ports）。
+#
+# 【切换环境不要改本文件】
+#   现场地址不一致时，用环境变量覆盖（api/config.py 读取）：
+#     RAG_MILVUS_URI / RAG_OPENSEARCH_URI / RAG_LLM_BASE_URL / RAG_LLM_MODEL ...
+#   这样镜像内容与现场配置解耦，同一份镜像可在试点机、扩容集群间复用。
+# ============================================================================
+
+deployment:
+  mode: docker
+
+storage:
+  vectorstore:
+    backend: milvus
+    uri: http://milvus:19530
+    collection: huodian_chunks
+    index_type: HNSW
+    metric_type: L2
+  bm25:
+    backend: opensearch
+    uri: http://opensearch:9200
+    index: huodian_bm25
+
+models:
+  llm:
+    base_url: http://vllm:8000/v1
+    model: Qwen3-14B
+    enable_thinking: false
+  # 向量化 / 意图 / 精排 / 版面：若与 API 服务同网络部署，同样用服务名；
+  # 若独立部署在 GPU 节点上，则改用该节点的内网地址（或由环境变量覆盖）。
+  embedder:
+    service_url: http://embed:8001/v1/embeddings
+  intent:
+    service_url: http://embed:8002/v1/embeddings
+  reranker:
+    service_url: http://rerank:8003/v1/rank
+  layout:
+    service_url: http://layout:8004/v1/layout
